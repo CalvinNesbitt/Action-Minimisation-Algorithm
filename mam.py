@@ -1,14 +1,14 @@
 import numpy as np
+import pickle
 from scipy.optimize import minimize
 
-class Mam_alg:
+class MamJax:
     """
-    Class for an convient run of the MAM algorithm. Built on scipy.minimise method.
+    Class for running of the MAM algorithm with JAX. 
     
-    - Object creation requires drift and initial path (see __init__).
-    - Once object is created, user should set bounds for optimisation problem via .bnds property.
-    - Use of .run(options) method then evolves .instanton property under MAM algorithm.
-    - .instanton property contains current state of minmisation.
+    - Uses scipy.minimise to implement L-BFGS-B method.
+    - Uses JAX.jacfwd via JFW object to calculate the jacobian of the FW action.
+    - User should set bounds for optimisation problem via .bnds property.
     
     Properties
     -----------
@@ -21,7 +21,7 @@ class Mam_alg:
         Constraints for the minimisation problem.
         Should be set before running. Object performs default initialisation.
         User must set all bnds at the same time.
-        User provides shape of (T, ndim, 2).Indexed by: Time, ndim, lower/upper bound.
+        User provides shape of (time, ndim, 2).Indexed by: Time, ndim, lower/upper bound.
         Class reshapes for scipy.minimise usage.
         
     Methods
@@ -32,64 +32,55 @@ class Mam_alg:
     Attributes
     -----------
     
-    b_args: list 
-        Arguments used for drift b.
-        Note b is of form b(path, b_args)
-
+    res: scipy.optimize.OptimizeResult
+        Latest result from scipy minimise.
+        See scipy docs for the info it contains.
+    
+    p: list 
+        Arguments used for drift and diffusion functions in the JFW object.
+        
     ic: np array
         Initial condition for minimisation problem. 
         Shape is (time, ndim). 
-        Important that initial and final point specified.
 
     time: np array
         Time points that paths are parameterised along
-        Shape (T)
+        Shape (time)
         
-    nfev: integer
-        Number of function evaluations in MAM thus far.
+    nit: integer
+        Number of algorithm iterations thus far.
 
     """
     
-    def __init__(self, b, b_args, d, ic, time, bnds=None):
+    def __init__(self, JFW, ic, time, p, bnds=None):
         """
         Parameters
         ----------
-        b: function 
-            Takes path and returns drift.
-            Path input and are drift output are shape (time, ndim).
-            Should be of form b(path, b_args).
-            
-        b_args: list 
-            Further arguments for b.
-            Note b is of form b(path, b_args)
-            
-        d: function
-            Takes point along the path and returns inverse of diffusion matrix.
-            Of form d(point, b_args).
-            Point on path input is of shape (ndim).
-            Return is matrix of shape (ndim, ndim).
+        JFW: JFW Object 
+            Object that has ability to calculate FW action and it's jacobian.
+            Does most of the heavy lifting.
     
         ic: np array
             Initial instanton path. 
             Shape is (time, ndim). 
-            Important that initial and final point specified.
             
         time: np array
-            Time points that paths are parameterised along
-            Shape (T)
+            Time points that paths are parameterised along.
+            Shape (time).
             
-
+        p: list 
+            Arguments for drift and diffusion functions
+            
         """
         
         # User Accessed attrbutes
         self.time = time
-        self.b_args = b_args
+        self.p = p
         self.ic = ic
-        self.nfev=0
+        self.nit=0
         
         # Internal attributes
-        self._b = b
-        self._d = d
+        self._JFW = JFW
         self._user_shape = ic.shape
         self._ic = ic.flatten()
         self._instanton = ic.flatten() # Current state of minimisation
@@ -100,38 +91,13 @@ class Mam_alg:
         else:
             self.bnds = bnds
         
-    def _action(self, path):
-        """ Takes a path and computes the FW action along the path when ndim >1. If ndim=1,
-        object will use _1d_action.
-
-        Path input is of form necesseary for scipy.minimise (see parameter explanation).
-        Finite differences are used to approximate derivatives.
-        Trapezoidal Rule used to compute integral
-
-        Parameters
-        ----------
-        path: np array
-            shape is flat (time * ndim) for use by scipy.minimise
-            method reshapes into (time, ndim)
-        """
-        h = path.reshape(self._user_shape)                     
-        v = np.vstack(np.gradient(h, self.time, axis=0)) - self._b(h, self.b_args) #v from <v, D^-1v>
-
-        # Dot product calulcation
-        v2 = [] 
-        for (x, where) in zip(v, h): #<v, D^-1v> along the path
-            Dinv = self._d(where, self.b_args)
-            v2.append(x.dot(Dinv @ x.T))
-        return 0.5 * np.trapz(v2, x=self.time)
+    def _action(self, flat_path):
+        path = flat_path.reshape(self._user_shape)      
+        return self._JFW.action(path, self.time, self.p)
     
-    def _1d_action(self, path):
-        """
-        Same as _action method for 1d case. DOESN'T YET WORK FOR STATE DEPENDENT NOISE
-        """
-        h = path.reshape(self._user_shape)    
-        v = np.gradient(h, self.time) -  self._b(h, self.b_args)
-        integrand =  v**2
-        return 0.5 * np.trapz(integrand, x=self.time)
+    def _jacobian(self, flat_path):
+        path = flat_path.reshape(self._user_shape)      
+        return self._JFW.jacobian(path, self.time, self.p).flatten()
     
     @property
     def instanton(self):
@@ -181,17 +147,26 @@ class Mam_alg:
         # We then reshape to the form used by the object
         self._bnds = self._bnds.reshape(len(self.ic.flatten()), 2)
         
-    def run(self, opt, jac=None):
-        "Runs the MAM algorithm. opt feds scipy.minimize via options argument."
-        if (len(self._user_shape) == 1): #ndim=1 case
-            res = minimize(self._1d_action, self._instanton, method='L-BFGS-B', bounds = self._bnds, 
-               jac=jac, options=opt)
-        else:
-            res = minimize(self._action, self._instanton, method='L-BFGS-B', bounds = self._bnds, 
-                   jac=jac, options=opt)
-        print(res.message)
+    def run(self, opt):
+        "Runs the MAM algorithm. opt feeds scipy.minimize via options argument."
+        res = minimize(self._action, self._instanton, method='L-BFGS-B', bounds = self._bnds, 
+                   jac=self._jacobian, options=opt)
+        
+        # Update current info
         self._instanton = res.x
-        self.nfev += res.nfev
-        return res
+        self.nit += res.nit
+        self.res = res 
+        return 
+    
+    def save(self, name):
+        info = {
+            'Result': self.res,
+            'Parameters': self.p,
+            'nit': self.nit,
+            'time': self.time
+                        }
+        with open(f'{name}.pickle','wb') as file:
+            pickle.dump(info, file)
+        print(f'Saved at {name}.pickle')
         
         
