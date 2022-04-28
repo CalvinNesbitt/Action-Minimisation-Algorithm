@@ -103,15 +103,7 @@ class FreidlinWentzell:
         p: list
             Arguments for drift and diffusion functions.
         """
-        Ls = np.empty(path.shape[0])
-
-        #Boundary Values
-        Ls[0] = self._L0(path[:2], time[1] - time[0], p)
-        Ls[-1] = self._LN(path[-2:], time[-1] - time[-2], p)
-
-        # Middle Values
-        for i in range(1, path.shape[0] - 1):
-            Ls[i] = self._Lk(path[i-1:i+2], time[i+1] - time[i], p)
+        Ls = self.lagrangians(path, time, p)
         return 0.5 * np.trapz(Ls, dx=time[1] - time[0])
 
     def lagrangians(self, path, time, p):
