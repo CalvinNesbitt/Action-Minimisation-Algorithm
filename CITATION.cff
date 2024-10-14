@@ -1,0 +1,15 @@
+cff-version: 1.2.0
+title: Python implementation of the minimum action method
+message: >-
+  If you use this software, please cite it using the
+  metadata from this file.
+type: software
+authors:
+  - given-names: Calvin
+    family-names: Nesbitt
+    affiliation: University of Reading
+repository-code: "https://github.com/CalvinNesbitt/Action-Minimisation-Algorithm"
+abstract: Python implementation of the minimum action method~.
+license: MIT
+commit: 604ac2315f213523be62278a015ccaacca1d9f71
+version: 0.0.1
